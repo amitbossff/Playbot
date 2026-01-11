@@ -1,4 +1,3 @@
-
 import os
 import json
 from datetime import datetime, timedelta
@@ -9,16 +8,11 @@ from google_play_scraper import reviews, Sort
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
-# ───────── CONFIG ─────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
 SESSION = requests.Session()
 
-# Temporary per-chat state
 CHAT_STATE = {}  # chat_id -> {"app_id": str}
-
-# ───────── HELPERS ─────────
 
 def send_text(chat_id, text):
     SESSION.post(
@@ -54,14 +48,11 @@ def validate_date(user_date_str):
         return False, "❌ Future date allowed nahi hai"
 
     if user_date < min_date:
-        return False, (
-            f"❌ Sirf last 8–10 din ka data allowed hai\n"
-            f"Allowed range: {min_date} se {today}"
-        )
+        return False, f"❌ Sirf last 8–10 din allowed ({min_date} se {today})"
 
     return True, user_date
 
-def fetch_reviews_from_date(app_id, start_date):
+def fetch_reviews(app_id, start_date):
     all_reviews = []
     token = None
 
@@ -82,7 +73,6 @@ def fetch_reviews_from_date(app_id, start_date):
             r_date = r.get("at")
             if not r_date:
                 continue
-
             if r_date.date() < start_date:
                 return all_reviews
 
@@ -102,7 +92,6 @@ def generate_pdf(reviews_list, path):
     c = canvas.Canvas(path, pagesize=A4)
     width, height = A4
     y = height - 40
-
     c.setFont("Helvetica", 10)
 
     for i, r in enumerate(reviews_list, 1):
@@ -111,7 +100,6 @@ def generate_pdf(reviews_list, path):
             f"{r['review']}\n"
             + "-" * 90
         )
-
         for line in block.split("\n"):
             if y < 40:
                 c.showPage()
@@ -122,15 +110,12 @@ def generate_pdf(reviews_list, path):
 
     c.save()
 
-# ───────── SERVERLESS HANDLER ─────────
-
 class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
             length = int(self.headers.get("content-length", 0))
             body = json.loads(self.rfile.read(length))
-
             msg = body.get("message")
             if not msg:
                 return self._ok()
@@ -138,54 +123,39 @@ class handler(BaseHTTPRequestHandler):
             chat_id = msg["chat"]["id"]
             text = msg.get("text", "").strip()
 
-            # START
             if text == "/start":
                 CHAT_STATE.pop(chat_id, None)
-                send_text(
-                    chat_id,
-                    "Send Google Play App link"
-                )
+                send_text(chat_id, "Send Google Play App link")
                 return self._ok()
 
-            # STEP 1: EXPECTING LINK
             if chat_id not in CHAT_STATE:
                 app_id = extract_app_id(text)
                 if not app_id:
                     send_text(chat_id, "❌ Invalid Play Store link. Send again.")
                 else:
                     CHAT_STATE[chat_id] = {"app_id": app_id}
-                    send_text(
-                        chat_id,
-                        "Now send date (YYYY-MM-DD)\n"
-                        "⚠️ Sirf last 8–10 din allowed"
-                    )
+                    send_text(chat_id, "Now send date (YYYY-MM-DD)\n⚠️ Max 10 days old")
                 return self._ok()
 
-            # STEP 2: EXPECTING DATE
-            is_valid, result = validate_date(text)
-            if not is_valid:
+            ok, result = validate_date(text)
+            if not ok:
                 send_text(chat_id, result)
                 return self._ok()
 
             start_date = result
             app_id = CHAT_STATE[chat_id]["app_id"]
 
-            send_text(
-                chat_id,
-                "⏳ Fetching reviews & generating PDF..."
-            )
-
-            reviews_list = fetch_reviews_from_date(app_id, start_date)
+            send_text(chat_id, "⏳ Fetching reviews & generating PDF...")
+            reviews_list = fetch_reviews(app_id, start_date)
 
             if not reviews_list:
-                send_text(chat_id, "No reviews found in this date range.")
+                send_text(chat_id, "No reviews found.")
                 CHAT_STATE.pop(chat_id, None)
                 return self._ok()
 
             pdf_path = f"/tmp/reviews_{chat_id}.pdf"
             generate_pdf(reviews_list, pdf_path)
             send_pdf(chat_id, pdf_path)
-
             CHAT_STATE.pop(chat_id, None)
 
         except Exception as e:
@@ -193,6 +163,13 @@ class handler(BaseHTTPRequestHandler):
 
         self._ok()
 
-    def _ok(self):
+    def do_GET(self):
+        self._ok(b"Bot running")
+
+    def _ok(self, msg=b"ok"):
         self.send_response(200)
         self.end_headers()
+        try:
+            self.wfile.write(msg)
+        except:
+            pass
